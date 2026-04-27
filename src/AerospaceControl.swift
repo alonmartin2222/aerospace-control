@@ -1720,6 +1720,7 @@ class RootView: NSView, TabBarDelegate {
 
     override var mouseDownCanMoveWindow: Bool { false }
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     init(frame: NSRect, config: AppConfig, monitors: [MonitorInfo]) {
         self.config = config
@@ -1852,11 +1853,14 @@ class RootView: NSView, TabBarDelegate {
         // Hard-restart sketchybar if enabled (reload leaves duplicate items behind)
         Generators.reloadSketchybar(config)
         _ = shell("osascript -e 'display notification \"Configuration applied\" with title \"AeroSpace Control\"'")
-        NSApp.terminate(nil)
+        // Use exit(0) instead of NSApp.terminate so we don't depend on the run-loop
+        // delivering an applicationShouldTerminate cycle (which can hang under
+        // exec-and-forget). atexit handler still removes the PID file.
+        exit(0)
     }
 
     @objc func cancel() {
-        NSApp.terminate(nil)
+        exit(0)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -1997,6 +2001,39 @@ if args.contains("--watch") {
     exit(0)
 }
 
+// MARK: - Singleton (one GUI window at a time)
+// Each `ctrl-alt-r` press spawns a new process via aerospace's `exec-and-forget`,
+// so without this check multiple windows stack and steal each other's events.
+let GUI_PID_FILE = "/tmp/aerospace-control-gui.pid"
+
+func anotherGuiInstanceRunning() -> Bool {
+    guard let content = try? String(contentsOfFile: GUI_PID_FILE, encoding: .utf8),
+          let pid = pid_t(content.trimmingCharacters(in: .whitespacesAndNewlines)),
+          pid != ProcessInfo.processInfo.processIdentifier,
+          kill(pid, 0) == 0 else { return false }
+    return true
+}
+
+func writeGuiPidFile() {
+    let pid = "\(ProcessInfo.processInfo.processIdentifier)"
+    try? pid.write(toFile: GUI_PID_FILE, atomically: true, encoding: .utf8)
+}
+
+@_cdecl("ac_remove_gui_pid_file")
+func ac_remove_gui_pid_file() {
+    try? FileManager.default.removeItem(atPath: GUI_PID_FILE)
+}
+
+if anotherGuiInstanceRunning() {
+    NSLog("aerospace-control: another GUI instance is already running, exiting.")
+    exit(0)
+}
+writeGuiPidFile()
+atexit(ac_remove_gui_pid_file)
+// Also clean up on Ctrl-C / SIGTERM
+signal(SIGINT)  { _ in ac_remove_gui_pid_file(); exit(0) }
+signal(SIGTERM) { _ in ac_remove_gui_pid_file(); exit(0) }
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
@@ -2023,18 +2060,33 @@ let window = MapperWindow(
     backing: .buffered,
     defer: false
 )
-window.level = .floating
+// Use .screenSaver level: with .floating, sketchybar's bar (also floating-class)
+// or other window-manager overlays can sit on top and absorb mouse events,
+// making the GUI appear unresponsive even though the run-loop is healthy.
+window.level = .screenSaver
 window.isOpaque = false
 window.backgroundColor = .clear
 window.hasShadow = true
 window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+window.acceptsMouseMovedEvents = true
 
 let root = RootView(frame: NSRect(x: 0, y: 0, width: width, height: height), config: config, monitors: monitors)
 window.contentView = root
 window.makeFirstResponder(root)
-window.orderFrontRegardless()
-window.makeKey()
+window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
+
+// AeroSpace re-asserts focus right after exec-and-forget spawns us, so a single
+// activate() call can get overridden. Re-activate across the first 1.5 seconds
+// until the window is actually key.
+let activationDeadline = Date().addingTimeInterval(1.5)
+func nudgeActivation() {
+    guard Date() < activationDeadline, !window.isKeyWindow else { return }
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: nudgeActivation)
+}
+DispatchQueue.main.async(execute: nudgeActivation)
 
 // Only intercept keyDown when it's one of the global shortcuts AND no text field has focus.
 // Otherwise let the event flow normally so NSTextFields can receive typing.
@@ -2055,21 +2107,14 @@ NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
     return event
 }
 
+// Hide the Dock icon shortly after launch — the window stays floating + key.
+// Note: we used to also auto-dismiss on app deactivation, but that interacted
+// badly with NSAlert confirmations and `aerospace exec-and-forget`'s focus
+// quirks. Esc / Cancel / Apply are enough.
 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
     NSApp.setActivationPolicy(.accessory)
-    window.orderFrontRegardless()
-    window.makeKey()
+    window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
-
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-        // Dismiss only when the user switches to another application, not when one
-        // of our own windows (e.g. an NSAlert confirmation) takes key status.
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
-        ) { _ in
-            NSApp.terminate(nil)
-        }
-    }
 }
 
 app.run()
