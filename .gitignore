@@ -1,0 +1,16 @@
+# Build output
+bin/
+*.o
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local backup files made by uninstall.sh
+*.ac-bak
