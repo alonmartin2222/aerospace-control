@@ -2,31 +2,25 @@ import AppKit
 
 let AC_VERSION = "0.1.0"
 
-// MARK: - Catppuccin Mocha Colors
-struct Colors {
-    static let crust    = NSColor(red: 0x11/255, green: 0x11/255, blue: 0x1b/255, alpha: 1)
-    static let mantle   = NSColor(red: 0x18/255, green: 0x18/255, blue: 0x25/255, alpha: 1)
-    static let base     = NSColor(red: 0x1e/255, green: 0x1e/255, blue: 0x2e/255, alpha: 0.97)
-    static let surface0 = NSColor(red: 0x31/255, green: 0x32/255, blue: 0x44/255, alpha: 1)
-    static let surface1 = NSColor(red: 0x45/255, green: 0x47/255, blue: 0x5a/255, alpha: 1)
-    static let surface2 = NSColor(red: 0x58/255, green: 0x5b/255, blue: 0x70/255, alpha: 1)
-    static let overlay0 = NSColor(red: 0x6c/255, green: 0x70/255, blue: 0x86/255, alpha: 1)
-    static let subtext0 = NSColor(red: 0xa6/255, green: 0xad/255, blue: 0xc8/255, alpha: 1)
-    static let subtext1 = NSColor(red: 0xba/255, green: 0xc2/255, blue: 0xde/255, alpha: 1)
-    static let text     = NSColor(red: 0xcd/255, green: 0xd6/255, blue: 0xf4/255, alpha: 1)
-    static let pink     = NSColor(red: 0xf5/255, green: 0xc2/255, blue: 0xe7/255, alpha: 1)
-    static let mauve    = NSColor(red: 0xcb/255, green: 0xa6/255, blue: 0xf7/255, alpha: 1)
-    static let lavender = NSColor(red: 0xb4/255, green: 0xbe/255, blue: 0xfe/255, alpha: 1)
-    static let sapphire = NSColor(red: 0x74/255, green: 0xc7/255, blue: 0xec/255, alpha: 1)
-    static let blue     = NSColor(red: 0x89/255, green: 0xb4/255, blue: 0xfa/255, alpha: 1)
-    static let teal     = NSColor(red: 0x94/255, green: 0xe2/255, blue: 0xd5/255, alpha: 1)
-    static let green    = NSColor(red: 0xa6/255, green: 0xe3/255, blue: 0xa1/255, alpha: 1)
-    static let peach    = NSColor(red: 0xfa/255, green: 0xb3/255, blue: 0x87/255, alpha: 1)
-    static let red      = NSColor(red: 0xf3/255, green: 0x8b/255, blue: 0xa8/255, alpha: 1)
-    static let yellow   = NSColor(red: 0xf9/255, green: 0xe2/255, blue: 0xaf/255, alpha: 1)
-    static let sky      = NSColor(red: 0x89/255, green: 0xdc/255, blue: 0xeb/255, alpha: 1)
+// MARK: - Theme system
+/// Helper: hex literals like 0x1e1e2e + alpha → NSColor.
+private func hex(_ rgb: UInt32, _ alpha: CGFloat = 1) -> NSColor {
+    NSColor(red: CGFloat((rgb >> 16) & 0xff)/255,
+            green: CGFloat((rgb >> 8) & 0xff)/255,
+            blue: CGFloat(rgb & 0xff)/255,
+            alpha: alpha)
+}
 
-    static func byName(_ name: String) -> NSColor {
+/// All colors a theme provides. The neutral slots (crust..text) drive the
+/// chrome; the named accents (mauve..sky) are the workspace-color palette
+/// the user picks from.
+struct Theme {
+    let name: String
+    let crust, mantle, base, surface0, surface1, surface2: NSColor
+    let overlay0, subtext0, subtext1, text: NSColor
+    let pink, mauve, lavender, sapphire, blue, teal, green, peach, red, yellow, sky: NSColor
+
+    func colorByName(_ name: String) -> NSColor {
         switch name.lowercased() {
         case "mauve":    return mauve
         case "pink":     return pink
@@ -42,6 +36,99 @@ struct Colors {
         default:         return mauve
         }
     }
+}
+
+enum Themes {
+    static let catppuccinMocha = Theme(
+        name:     "catppuccin-mocha",
+        crust:    hex(0x11111b),
+        mantle:   hex(0x181825),
+        base:     hex(0x1e1e2e, 0.97),
+        surface0: hex(0x313244),
+        surface1: hex(0x45475a),
+        surface2: hex(0x585b70),
+        overlay0: hex(0x6c7086),
+        subtext0: hex(0xa6adc8),
+        subtext1: hex(0xbac2de),
+        text:     hex(0xcdd6f4),
+        pink:     hex(0xf5c2e7),
+        mauve:    hex(0xcba6f7),
+        lavender: hex(0xb4befe),
+        sapphire: hex(0x74c7ec),
+        blue:     hex(0x89b4fa),
+        teal:     hex(0x94e2d5),
+        green:    hex(0xa6e3a1),
+        peach:    hex(0xfab387),
+        red:      hex(0xf38ba8),
+        yellow:   hex(0xf9e2af),
+        sky:      hex(0x89dceb)
+    )
+
+    /// Inspired by a moonlit Japanese landscape: deep midnight navy, sakura
+    /// pink, torii vermillion, cool moonlight white, faint aurora cyan.
+    static let midnightTorii = Theme(
+        name:     "midnight-torii",
+        crust:    hex(0x05071a),
+        mantle:   hex(0x0a0e26),
+        base:     hex(0x10153a, 0.97),
+        surface0: hex(0x1c2451),
+        surface1: hex(0x2c386f),
+        surface2: hex(0x3f4d8c),
+        overlay0: hex(0x5969a5),
+        subtext0: hex(0x8c98c4),
+        subtext1: hex(0xb5beda),
+        text:     hex(0xe6ebff),
+        pink:     hex(0xe89bc6),
+        mauve:    hex(0xb39bff),
+        lavender: hex(0xa1b3ff),
+        sapphire: hex(0x6dabf0),
+        blue:     hex(0x5b8def),
+        teal:     hex(0x74d0d6),
+        green:    hex(0x7be0a4),
+        peach:    hex(0xefc498),
+        red:      hex(0xd44a5e),
+        yellow:   hex(0xf3e7a3),
+        sky:      hex(0xa8d8ee)
+    )
+
+    /// Mutable runtime selection. Defaults to catppuccin-mocha; main() updates
+    /// from config.json before any UI is built.
+    static var current: Theme = catppuccinMocha
+
+    static let all: [Theme] = [catppuccinMocha, midnightTorii]
+
+    static func byName(_ name: String) -> Theme? {
+        all.first { $0.name == name }
+    }
+}
+
+/// Backward-compatible facade — every site that already reads `Colors.mauve`,
+/// `Colors.surface1`, etc continues to work; values now resolve through the
+/// active theme at access time.
+enum Colors {
+    static var crust:    NSColor { Themes.current.crust }
+    static var mantle:   NSColor { Themes.current.mantle }
+    static var base:     NSColor { Themes.current.base }
+    static var surface0: NSColor { Themes.current.surface0 }
+    static var surface1: NSColor { Themes.current.surface1 }
+    static var surface2: NSColor { Themes.current.surface2 }
+    static var overlay0: NSColor { Themes.current.overlay0 }
+    static var subtext0: NSColor { Themes.current.subtext0 }
+    static var subtext1: NSColor { Themes.current.subtext1 }
+    static var text:     NSColor { Themes.current.text }
+    static var pink:     NSColor { Themes.current.pink }
+    static var mauve:    NSColor { Themes.current.mauve }
+    static var lavender: NSColor { Themes.current.lavender }
+    static var sapphire: NSColor { Themes.current.sapphire }
+    static var blue:     NSColor { Themes.current.blue }
+    static var teal:     NSColor { Themes.current.teal }
+    static var green:    NSColor { Themes.current.green }
+    static var peach:    NSColor { Themes.current.peach }
+    static var red:      NSColor { Themes.current.red }
+    static var yellow:   NSColor { Themes.current.yellow }
+    static var sky:      NSColor { Themes.current.sky }
+
+    static func byName(_ name: String) -> NSColor { Themes.current.colorByName(name) }
 }
 
 // MARK: - Shell
@@ -101,6 +188,8 @@ struct AppConfig: Codable {
     var monitor_layouts: [String: [String: String]]?
     /// Optional sketchybar integration (off by default).
     var sketchybar: SketchybarConfig?
+    /// GUI color theme name (one of `Themes.all`). Default: catppuccin-mocha.
+    var theme: String?
     /// Optional override of the `sketchybar --bar display=N` number per monitor.
     /// Keyed by monitor signature (sorted names joined with `|`) so each unique
     /// monitor combination has its own mapping — sketchybar's display indices
@@ -357,32 +446,30 @@ enum Generators {
         _ = shell("chmod +x \(Paths.workspacesSh)")
     }
 
-    /// Bash-sourceable `ws_color` function for sketchybar integrations.
+    /// Convert an NSColor to sketchybar's `0xAARRGGBB` hex literal.
+    static func sketchybarHex(_ color: NSColor) -> String {
+        let c = color.usingColorSpace(.sRGB) ?? color
+        let r = Int((c.redComponent   * 255).rounded())
+        let g = Int((c.greenComponent * 255).rounded())
+        let b = Int((c.blueComponent  * 255).rounded())
+        return String(format: "0xFF%02x%02x%02x", r, g, b)
+    }
+
+    /// Bash-sourceable `ws_color` function for sketchybar integrations. Colors
+    /// are sourced from the active theme so switching themes propagates.
     static func regenerateWorkspaceColorsShell(_ config: AppConfig) {
-        let hex: [String: String] = [
-            "mauve":    "0xFFcba6f7",
-            "pink":     "0xFFf5c2e7",
-            "blue":     "0xFF89b4fa",
-            "sapphire": "0xFF74c7ec",
-            "lavender": "0xFFb4befe",
-            "teal":     "0xFF94e2d5",
-            "peach":    "0xFFfab387",
-            "green":    "0xFFa6e3a1",
-            "red":      "0xFFf38ba8",
-            "yellow":   "0xFFf9e2af",
-            "sky":      "0xFF89dceb",
-        ]
         var cases = ""
         for ws in config.workspaces {
-            let code = hex[ws.color.lowercased()] ?? "0xFFcba6f7"
+            let code = sketchybarHex(Colors.byName(ws.color))
             cases += "        \(ws.id)) echo \(code) ;;\n"
         }
+        let fallback = sketchybarHex(Colors.mauve)
         let content = """
         #!/bin/bash
         \(GEN_HEADER)
         ws_color() {
             case "$1" in
-        \(cases)        *) echo 0xFFcba6f7 ;;
+        \(cases)        *) echo \(fallback) ;;
             esac
         }
         """
@@ -394,10 +481,14 @@ enum Generators {
 
     /// Rewrite SPACE_ICONS / SPACE_COLORS in sketchybarrc, but only if the user
     /// added the marker block themselves (we never modify their file unsolicited).
+    /// Emits raw hex so the active theme drives the bar colors directly,
+    /// independent of whatever $MAUVE/$BLUE the user has defined elsewhere.
     static func regenerateSketchybarWorkspaces(_ config: AppConfig) {
         guard config.sketchybar?.enabled == true else { return }
         let ids = config.workspaces.map { "\"\($0.id)\"" }.joined(separator: " ")
-        let colors = config.workspaces.map { "$\($0.color.uppercased())" }.joined(separator: " ")
+        let colors = config.workspaces
+            .map { sketchybarHex(Colors.byName($0.color)) }
+            .joined(separator: " ")
         let body = """
         \(GEN_HEADER)
         SPACE_ICONS=(\(ids))
@@ -1809,6 +1900,29 @@ class RootView: NSView, TabBarDelegate {
         title.frame.origin = NSPoint(x: 24, y: bounds.height - 34)
         addSubview(title)
 
+        // Theme picker (top-right of header). Click to pop a menu of available
+        // themes; selecting one saves to config and re-launches with the new
+        // theme applied.
+        let themeBtn = NSButton(frame: NSRect(x: 0, y: 0, width: 0, height: 26))
+        themeBtn.title = "🎨 \(Themes.current.name)  ▾"
+        themeBtn.bezelStyle = .regularSquare
+        themeBtn.isBordered = false
+        themeBtn.wantsLayer = true
+        themeBtn.layer?.cornerRadius = 8
+        themeBtn.layer?.backgroundColor = Colors.surface0.cgColor
+        themeBtn.layer?.borderWidth = 1
+        themeBtn.layer?.borderColor = Colors.surface1.cgColor
+        themeBtn.contentTintColor = Colors.subtext1
+        themeBtn.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        themeBtn.target = self
+        themeBtn.action = #selector(showThemeMenu(_:))
+        themeBtn.sizeToFit()
+        themeBtn.frame.size.width += 16
+        themeBtn.frame.size.height = 26
+        themeBtn.frame.origin = NSPoint(x: bounds.width - themeBtn.frame.width - 24,
+                                        y: bounds.height - 32)
+        addSubview(themeBtn)
+
         // Tab bar (centered below title)
         tabBar = TabBarView(tabs: ["Monitors", "Apps", "Workspaces"],
                             frame: NSRect(x: 0, y: bounds.height - 76, width: bounds.width, height: 36))
@@ -1915,6 +2029,46 @@ class RootView: NSView, TabBarDelegate {
         exit(0)
     }
 
+    @objc func showThemeMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        for theme in Themes.all {
+            let item = NSMenuItem(title: theme.name,
+                                  action: #selector(pickTheme(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = theme.name
+            if theme.name == Themes.current.name { item.state = .on }
+            menu.addItem(item)
+        }
+        let origin = NSPoint(x: 0, y: sender.bounds.height + 4)
+        menu.popUp(positioning: nil, at: origin, in: sender)
+    }
+
+    @objc func pickTheme(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              name != Themes.current.name else { return }
+        var cfg = config
+        cfg.theme = name
+        ConfigManager.save(cfg)
+        // Regenerate so theme-derived files (sketchybarrc, workspace-colors.sh)
+        // pick up the new palette right away. Then re-launch so the GUI itself
+        // re-renders with the new theme.
+        Generators.regenerateAll(cfg)
+        Generators.reloadSketchybar(cfg)
+        relaunchSelf()
+    }
+
+    private func relaunchSelf() {
+        let path = ProcessInfo.processInfo.arguments.first ?? ""
+        if !path.isEmpty {
+            let task = Process()
+            task.launchPath = "/bin/bash"
+            task.arguments = ["-c", "sleep 0.2 && \"\(path)\" >/dev/null 2>&1 &"]
+            try? task.run()
+        }
+        exit(0)
+    }
+
     override func keyDown(with event: NSEvent) {
         let cmd = event.modifierFlags.contains(.command)
         switch event.keyCode {
@@ -2010,6 +2164,14 @@ func runAutoRestore() {
 
 // MARK: - Main
 let args = CommandLine.arguments
+
+// Resolve theme from config early so any generator (workspace-colors.sh,
+// sketchybarrc SPACE_COLORS) emits the correct hex values for the active theme.
+if let cfgName = (try? JSONDecoder().decode(AppConfig.self,
+        from: Data(contentsOf: URL(fileURLWithPath: Paths.configFile))))?.theme,
+   let t = Themes.byName(cfgName) {
+    Themes.current = t
+}
 
 // --version: print version and exit (used by package managers).
 if args.contains("--version") || args.contains("-v") {
@@ -2138,6 +2300,13 @@ app.setActivationPolicy(.regular)
 Bootstrap.ensureAerospaceMarkers()
 
 let config = ConfigManager.load()
+
+// Resolve theme from config BEFORE building any view so all colors render
+// against the active theme.
+if let name = config.theme, let t = Themes.byName(name) {
+    Themes.current = t
+}
+
 let monitors = detectMonitors()
 
 let mouseLocation = NSEvent.mouseLocation
