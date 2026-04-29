@@ -59,9 +59,14 @@ echo "→ Installing binary to $BIN_PATH"
 if [ -w "$PREFIX" ] || [ -w "$BIN_DIR" ] 2>/dev/null; then
     install -d "$BIN_DIR"
     install -m 0755 "$REPO_DIR/bin/aerospace-control" "$BIN_PATH"
+    # Re-apply ad-hoc signature: `install` (and `cp`) can break the
+    # linker-signed Mach-O signature, leaving Gatekeeper to SIGKILL the
+    # binary on launch ("Taskgated Invalid Signature").
+    codesign --force -s - "$BIN_PATH" 2>/dev/null || true
 else
     sudo install -d "$BIN_DIR"
     sudo install -m 0755 "$REPO_DIR/bin/aerospace-control" "$BIN_PATH"
+    sudo codesign --force -s - "$BIN_PATH" 2>/dev/null || true
 fi
 
 # ── First-run setup ───────────────────────────────────────────────────────────
