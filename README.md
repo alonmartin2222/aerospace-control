@@ -10,7 +10,12 @@ Layouts are remembered per monitor combination, so switching between
 laptop-only, dual-monitor, and triple-monitor setups restores your saved
 arrangement automatically.
 
-![tabs: Monitors / Apps / Workspaces](docs/screenshot.png)
+<p align="center">
+  <img src="docs/monitors-tab.png" alt="Monitors tab — drag workspace chips between monitors" width="49%">
+  <img src="docs/apps-tab.png" alt="Apps tab — click a workspace chip to assign an app" width="49%">
+</p>
+
+<p align="center"><sub><b>Monitors</b> tab (left): drag workspace chips between detected monitors. <b>Apps</b> tab (right): click a workspace chip to assign an app.</sub></p>
 
 ## Features
 
