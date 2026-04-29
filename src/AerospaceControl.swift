@@ -53,6 +53,17 @@ func shell(_ command: String) -> String {
     task.standardError = FileHandle.nullDevice
     task.launchPath = "/bin/bash"
     task.arguments = ["-c", command]
+    // launchd starts our daemon with a minimal PATH that omits the homebrew
+    // bin directories — without this, `aerospace` and `sketchybar` aren't
+    // findable when --watch / --auto runs from a LaunchAgent.
+    var env = ProcessInfo.processInfo.environment
+    let extras = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    let existing = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+    let merged = (extras + existing).reduce(into: [String]()) { acc, p in
+        if !acc.contains(p) { acc.append(p) }
+    }
+    env["PATH"] = merged.joined(separator: ":")
+    task.environment = env
     task.launch()
     task.waitUntilExit()
     return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -90,6 +101,21 @@ struct AppConfig: Codable {
     var monitor_layouts: [String: [String: String]]?
     /// Optional sketchybar integration (off by default).
     var sketchybar: SketchybarConfig?
+    /// Optional override of the `sketchybar --bar display=N` number per monitor.
+    /// Keyed by monitor signature (sorted names joined with `|`) so each unique
+    /// monitor combination has its own mapping — sketchybar's display indices
+    /// depend on which monitors are currently connected. If the auto-detected
+    /// number routes the bar to the wrong physical screen for a given combo,
+    /// add an entry here:
+    ///
+    ///     "sketchybar_displays": {
+    ///         "Built-in Retina Display|L27h-4A|LG Ultra HD": {
+    ///             "Built-in Retina Display": 1,
+    ///             "L27h-4A": 2,
+    ///             "LG Ultra HD": 3
+    ///         }
+    ///     }
+    var sketchybar_displays: [String: [String: Int]]?
 
     func color(for workspaceId: String) -> NSColor {
         if let ws = workspaces.first(where: { $0.id == workspaceId }) {
@@ -424,25 +450,51 @@ struct MonitorInfo {
 func detectMonitors() -> [MonitorInfo] {
     let output = shell("aerospace list-monitors --format '%{monitor-id} | %{monitor-name}'")
     let screens = NSScreen.screens
-    var result: [MonitorInfo] = []
 
+    // Pass 1: parse aerospace's monitor list and match each to an NSScreen.
+    struct Raw { let aid: Int; let name: String; let screen: NSScreen? }
+    var raw: [Raw] = []
     for line in output.components(separatedBy: "\n") where !line.isEmpty {
         let parts = line.components(separatedBy: " | ")
         guard parts.count >= 2,
               let aid = Int(parts[0].trimmingCharacters(in: .whitespaces)) else { continue }
         let name = parts[1].trimmingCharacters(in: .whitespaces)
-        let screen = screens.first { screen in
-            if #available(macOS 10.15, *) { return screen.localizedName == name }
+        let screen = screens.first { s in
+            if #available(macOS 10.15, *) { return s.localizedName == name }
             return false
         }
-        let sbIdx: Int
-        if let screen = screen, let idx = screens.firstIndex(of: screen) {
-            sbIdx = idx + 1
-        } else {
-            sbIdx = aid
-        }
-        let px = screen?.frame.origin.x ?? CGFloat(aid) * 10000
-        result.append(MonitorInfo(aerospaceId: aid, name: name, screen: screen,
+        raw.append(Raw(aid: aid, name: name, screen: screen))
+    }
+
+    // Look up per-signature override map (monitor name → sketchybar index)
+    // for the current monitor combination, falling back to {} if absent.
+    let signature = raw.map { $0.name }.sorted().joined(separator: "|")
+    let cfg = try? JSONDecoder().decode(AppConfig.self,
+        from: Data(contentsOf: URL(fileURLWithPath: Paths.configFile)))
+    let overrides: [String: Int] = cfg?.sketchybar_displays?[signature] ?? [:]
+
+    // Auto-detection fallback uses CGGetActiveDisplayList — its order isn't
+    // guaranteed to match sketchybar's display-arrangement order (sketchybar
+    // doesn't expose its order via any public API), so the user can override.
+    var displayCount: UInt32 = 0
+    CGGetActiveDisplayList(0, nil, &displayCount)
+    var cgDisplays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+    CGGetActiveDisplayList(displayCount, &cgDisplays, &displayCount)
+
+    func autoSketchybarIdx(for screen: NSScreen) -> Int? {
+        guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+        let did = CGDirectDisplayID(num.uint32Value)
+        return cgDisplays.firstIndex(of: did).map { $0 + 1 }
+    }
+
+    var result: [MonitorInfo] = []
+    for r in raw {
+        let sbIdx: Int = overrides[r.name]
+            ?? r.screen.flatMap(autoSketchybarIdx)
+            ?? screens.firstIndex(where: { $0 == r.screen }).map { $0 + 1 }
+            ?? r.aid
+        let px = r.screen?.frame.origin.x ?? CGFloat(r.aid) * 10000
+        result.append(MonitorInfo(aerospaceId: r.aid, name: r.name, screen: r.screen,
                                   sketchybarIndex: sbIdx, physicalX: px))
     }
     return result.sorted { $0.physicalX < $1.physicalX }
@@ -1934,19 +1986,26 @@ func defaultLayoutFor(workspaces: [WorkspaceConfig], monitors: [MonitorInfo]) ->
 func runAutoRestore() {
     var cfg = ConfigManager.load()
     let mons = detectMonitors()
-    guard !mons.isEmpty else { return }
+    guard !mons.isEmpty else {
+        NSLog("aerospace-control: runAutoRestore — no monitors detected, skipping")
+        return
+    }
     let sig = monitorSignature(mons)
+    NSLog("aerospace-control: runAutoRestore — sig=\(sig), \(mons.count) monitors")
 
     let layout: [String: String]
     if let saved = cfg.monitor_layouts?[sig] {
         layout = saved
+        NSLog("aerospace-control: using saved layout (\(saved.count) workspaces)")
     } else {
         layout = defaultLayoutFor(workspaces: cfg.workspaces, monitors: mons)
         if cfg.monitor_layouts == nil { cfg.monitor_layouts = [:] }
         cfg.monitor_layouts![sig] = layout
         ConfigManager.save(cfg)
+        NSLog("aerospace-control: no saved layout for this combo — applied default and saved")
     }
     applyLayoutHeadless(layout: layout, monitors: mons)
+    NSLog("aerospace-control: applyLayoutHeadless done")
 }
 
 // MARK: - Main
@@ -1983,20 +2042,57 @@ if args.contains("--auto") {
 if args.contains("--watch") {
     let watcherApp = NSApplication.shared
     watcherApp.setActivationPolicy(.accessory)
-    runAutoRestore()  // initial pass
-    var lastSignature = monitorSignature(detectMonitors())
-    NotificationCenter.default.addObserver(
-        forName: NSApplication.didChangeScreenParametersNotification,
-        object: nil, queue: .main
-    ) { _ in
-        // Debounce: macOS fires this multiple times during connect/disconnect.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-            let sig = monitorSignature(detectMonitors())
-            guard sig != lastSignature else { return }
+    NSLog("aerospace-control --watch: starting")
+
+    var lastSignature = ""
+
+    /// Re-detect signature and run auto-restore if it changed. Used by both
+    /// the screen-parameters notification and the periodic poll. The empty
+    /// signature short-circuits — when aerospace hasn't reported monitors yet
+    /// (eg. just after our launch-agent started), we don't want to overwrite
+    /// the cached state with an empty layout.
+    func checkAndApply(reason: String) {
+        let mons = detectMonitors()
+        guard !mons.isEmpty else {
+            if reason != "poll" { NSLog("aerospace-control --watch: \(reason) — no monitors yet, deferring") }
+            return
+        }
+        let sig = monitorSignature(mons)
+        if sig != lastSignature {
+            NSLog("aerospace-control --watch: signature changed (\(reason)): \(lastSignature) → \(sig)")
             lastSignature = sig
             runAutoRestore()
         }
     }
+
+    // Notification: 1.5s debounce — aerospace can take a moment to settle on
+    // its new monitor list after connect/disconnect; reading too soon gives
+    // stale state.
+    NotificationCenter.default.addObserver(
+        forName: NSApplication.didChangeScreenParametersNotification,
+        object: nil, queue: .main
+    ) { _ in
+        NSLog("aerospace-control --watch: didChangeScreenParameters fired")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            checkAndApply(reason: "notification")
+        }
+    }
+
+    // Periodic fallback. macOS sometimes drops the notification (lid events,
+    // DisplayLink / USB-C hub flapping). Use Timer with .common mode so it
+    // fires under NSApplication's run loop (the default-init Timer doesn't).
+    let pollTimer = Timer(timeInterval: 3.0, repeats: true) { _ in
+        checkAndApply(reason: "poll")
+    }
+    RunLoop.main.add(pollTimer, forMode: .common)
+
+    // First pass: try once now, then schedule another attempt at +2s in case
+    // aerospace's CLI isn't responsive yet at launch.
+    checkAndApply(reason: "init")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        checkAndApply(reason: "init+2s")
+    }
+
     watcherApp.run()
     exit(0)
 }
