@@ -92,20 +92,20 @@ cat <<EOF
 
 Next steps:
 
-1. Add a keybinding to ~/.config/aerospace/aerospace.toml inside
-   [mode.main.binding] to launch the GUI:
+1. Reload aerospace:   aerospace reload-config
+2. Press ctrl+alt+r to open the mapper.
+
+If ~/.config/aerospace/aerospace.toml already existed, ctrl+alt+r was NOT
+added automatically. Add this inside the [mode.main.binding] section:
 
        ctrl-alt-r = "exec-and-forget ${BIN_PATH}"
 
-2. Optional: run aerospace-control --auto on aerospace startup so layouts
-   restore on login. Add to your top-level after-startup-command list:
+Optional: run aerospace-control --auto on aerospace startup so layouts
+restore on login. Add to your top-level after-startup-command list:
 
        after-startup-command = [
          "exec-and-forget sleep 2 && ${BIN_PATH} --auto",
        ]
-
-3. Reload aerospace:   aerospace reload-config
-4. Press your keybinding (default ctrl+alt+r) to open the mapper.
 
 Sketchybar integration is OFF by default. Enable in the config:
     "sketchybar": { "enabled": true }
