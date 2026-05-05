@@ -20,10 +20,13 @@
     <key>ProcessType</key>
     <string>Interactive</string>
 
+    <!-- Single log: NSLog writes to stderr and shell() output to stdout, but
+         users expect one file to tail. Point both at .log so everything ends
+         up in one place. -->
     <key>StandardOutPath</key>
     <string>/tmp/aerospace-control-watcher.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/aerospace-control-watcher.err</string>
+    <string>/tmp/aerospace-control-watcher.log</string>
 </dict>
 </plist>

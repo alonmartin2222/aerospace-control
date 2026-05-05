@@ -178,6 +178,37 @@ struct SketchybarConfig: Codable {
     var path: String?  // optional override; if nil, the binary is auto-detected
 }
 
+/// Inner / outer gap values written into aerospace.toml's `[gaps]` section. All
+/// fields are optional so a partially-configured monitor uses the default for
+/// the missing sides.
+struct MonitorPadding: Codable {
+    var top: Int?
+    var right: Int?
+    var bottom: Int?
+    var left: Int?
+}
+
+/// Preferences tab state. All fields are optional so older config files load
+/// cleanly and missing values fall back to documented defaults.
+struct PreferencesConfig: Codable {
+    /// `tiles` or `accordion` (matches aerospace's `default-root-container-layout`).
+    var default_layout: String?
+    /// `auto`, `horizontal`, or `vertical` (matches aerospace's
+    /// `default-root-container-orientation`).
+    var default_orientation: String?
+    /// Inner gap (between tiled windows).
+    var inner_horizontal: Int?
+    var inner_vertical: Int?
+    /// Per-monitor outer gaps (keyed by monitor name). When set, the gaps
+    /// marker block is regenerated and the user's inline `[gaps]` section
+    /// (if any) is migrated into the marker.
+    var monitor_padding: [String: MonitorPadding]?
+    /// Default outer gap for monitors without an explicit override.
+    var default_outer: MonitorPadding?
+    /// Generate `alt-shift-backtick = "exec-and-forget …reset-windows.sh"`.
+    var reset_windows_binding: Bool?
+}
+
 struct AppConfig: Codable {
     var version: Int
     var workspaces: [WorkspaceConfig]
@@ -205,6 +236,10 @@ struct AppConfig: Codable {
     ///         }
     ///     }
     var sketchybar_displays: [String: [String: Int]]?
+
+    /// Layout, gaps, and toggles surfaced in the Preferences tab. Optional so
+    /// existing config files load without migration.
+    var preferences: PreferencesConfig?
 
     func color(for workspaceId: String) -> NSColor {
         if let ws = workspaces.first(where: { $0.id == workspaceId }) {
@@ -343,6 +378,15 @@ enum Bootstrap {
         enable-normalization-flatten-containers = true
         enable-normalization-opposite-orientation-for-nested-containers = true
 
+        # Restore the saved layout for the current monitor combination on login.
+        # `sleep 2` lets aerospace finish starting before we ask it for monitors.
+        after-startup-command = [
+          "exec-and-forget sleep 2 && \(binary) --auto",
+        ]
+
+        # === BEGIN GENERATED: preferences ===
+        # === END GENERATED: preferences ===
+
         [mode.main.binding]
         # Launch the aerospace-control GUI
         ctrl-alt-r = "exec-and-forget \(binary)"
@@ -357,8 +401,117 @@ enum Bootstrap {
         NSLog("[bootstrap] created default aerospace.toml at \(path)")
     }
 
+    /// Ensure aerospace's `after-startup-command` includes our `--auto` entry,
+    /// so layouts restore on login. Handles three shapes:
+    ///   1. No `after-startup-command` anywhere → append a top-level entry.
+    ///   2. Empty array `after-startup-command = []` → replace.
+    ///   3. Existing array (single or multi-line) → insert our entry inside if
+    ///      not already present. Skip silently when our line is already there.
+    /// Idempotent.
+    static func ensureAfterStartupCommand() -> Bool {
+        let path = Paths.aerospaceToml
+        guard var text = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+        // Build the entry against the actual installed binary path so the user
+        // doesn't have to edit it.
+        let argv0 = CommandLine.arguments.first ?? "aerospace-control"
+        let resolved = (try? FileManager.default
+            .destinationOfSymbolicLink(atPath: argv0)) ?? argv0
+        let binary = resolved.hasPrefix("/")
+            ? resolved
+            : URL(fileURLWithPath: argv0).standardizedFileURL.path
+        let entry = "\"exec-and-forget sleep 2 && \(binary) --auto\""
+
+        // Already wired up — no-op. Match by `aerospace-control --auto`
+        // (path-agnostic) so an existing `~/.local/bin/aerospace-control --auto`
+        // entry isn't duplicated when our resolved path expands the tilde.
+        if text.contains("aerospace-control --auto") { return false }
+
+        // Find a top-level `after-startup-command = [` (regex tolerates spaces).
+        let pattern = #"(?m)^\s*after-startup-command\s*=\s*\["#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        let nsText = text as NSString
+        if let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)) {
+            // Find matching `]` after the opening bracket.
+            let openIdx = match.range.location + match.range.length - 1  // index of `[`
+            var depth = 1
+            var i = openIdx + 1
+            while i < nsText.length && depth > 0 {
+                let ch = nsText.substring(with: NSRange(location: i, length: 1))
+                if ch == "[" { depth += 1 }
+                if ch == "]" { depth -= 1 }
+                if depth == 0 { break }
+                i += 1
+            }
+            if depth != 0 { return false }
+            let closeIdx = i
+            let arrayBody = nsText.substring(with: NSRange(location: openIdx + 1,
+                                                          length: closeIdx - openIdx - 1))
+            let trimmed = arrayBody.trimmingCharacters(in: .whitespacesAndNewlines)
+            let inserted: String
+            if trimmed.isEmpty {
+                inserted = "\n  \(entry),\n"
+            } else if trimmed.hasSuffix(",") {
+                inserted = "\(arrayBody)\n  \(entry),\n"
+            } else {
+                inserted = "\(arrayBody),\n  \(entry),\n"
+            }
+            let newRange = NSRange(location: openIdx + 1, length: closeIdx - openIdx - 1)
+            text = nsText.replacingCharacters(in: newRange, with: inserted)
+            try? text.write(toFile: path, atomically: true, encoding: .utf8)
+            NSLog("[bootstrap] added --auto entry to existing after-startup-command")
+            return true
+        }
+        // Not present at all — append a fresh top-level array.
+        let block = """
+
+        # Restore the saved layout for the current monitor combination on login.
+        after-startup-command = [
+          \(entry),
+        ]
+
+        """
+        text += block
+        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+        NSLog("[bootstrap] inserted new after-startup-command")
+        return true
+    }
+
+    /// Comment out a managed binding key (e.g. `alt-shift-backtick`) when it
+    /// appears OUTSIDE the workspace-bindings marker. We add the same key
+    /// inside the marker on toggle-on, and TOML rejects duplicates.
+    /// Idempotent — already-commented lines are skipped.
+    static func migrateConflictingBinding(_ key: String) {
+        let path = Paths.aerospaceToml
+        guard var text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        let beginMarker = "# === BEGIN GENERATED: workspace-bindings ==="
+        let endMarker   = "# === END GENERATED: workspace-bindings ==="
+        var lines = text.components(separatedBy: "\n")
+        var insideMarker = false
+        var commented = false
+        for i in 0..<lines.count {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed == beginMarker { insideMarker = true; continue }
+            if trimmed == endMarker   { insideMarker = false; continue }
+            if insideMarker { continue }
+            if trimmed.hasPrefix("#") { continue }
+            if trimmed.hasPrefix(key) && trimmed.dropFirst(key.count).first.map(\.isLetter) != true {
+                lines[i] = "# [aerospace-control] migrated → workspace-bindings marker:  " + lines[i]
+                commented = true
+            }
+        }
+        if commented {
+            text = lines.joined(separator: "\n")
+            try? text.write(toFile: path, atomically: true, encoding: .utf8)
+            NSLog("[bootstrap] migrated conflicting `\(key)` binding")
+        }
+    }
+
     static func ensureAerospaceMarkers() {
         ensureAerospaceTomlExists()
+        _ = ensureAfterStartupCommand()
+        // Always migrate keys we generate so toggling them later in the GUI
+        // doesn't produce TOML duplicates.
+        migrateConflictingBinding("alt-shift-backtick")
         let path = Paths.aerospaceToml
         guard var text = try? String(contentsOfFile: path, encoding: .utf8) else {
             NSLog("[bootstrap] aerospace.toml not found at \(path) — skipping marker insertion.")
@@ -393,10 +546,82 @@ enum Bootstrap {
             changed = true
         }
 
+        // preferences marker — top-level layout/orientation/gaps. Must land
+        // BEFORE any `[section]` header in the file: TOML scopes bare keys
+        // under the most recent table, so `default-root-container-layout = …`
+        // placed after `[gaps]` becomes `gaps.default-root-container-layout`
+        // and aerospace rejects it.
+        if !text.contains("# === BEGIN GENERATED: preferences ===") {
+            // First, comment out any pre-existing top-level keys we manage so
+            // they don't TOML-clash with our generated equivalents on first
+            // GUI Apply. Idempotent — already-commented lines are skipped.
+            let managed = ["default-root-container-layout",
+                          "default-root-container-orientation"]
+            var lines = text.components(separatedBy: "\n")
+            var commented = false
+            for i in 0..<lines.count {
+                let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("#") { continue }
+                for key in managed where trimmed.hasPrefix(key) {
+                    lines[i] = "# [aerospace-control] migrated → preferences marker:  " + lines[i]
+                    commented = true
+                    break
+                }
+            }
+            if commented { text = lines.joined(separator: "\n") }
+
+            let block = "\n# === BEGIN GENERATED: preferences ===\n# === END GENERATED: preferences ===\n\n"
+            // Find the first top-level `[…]` line.
+            var insertAt: String.Index = text.endIndex
+            for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                if t.hasPrefix("[") && t.hasSuffix("]") {
+                    if let r = text.range(of: String(line)) { insertAt = r.lowerBound }
+                    break
+                }
+            }
+            text.insert(contentsOf: block, at: insertAt)
+            changed = true
+        }
+
         if changed {
             try? text.write(toFile: path, atomically: true, encoding: .utf8)
             NSLog("[bootstrap] inserted marker blocks into aerospace.toml")
         }
+    }
+
+    /// Comment out an inline `[gaps]` table when the user enables managed
+    /// padding from the Preferences tab. TOML rejects duplicate keys (our
+    /// generated `gaps.outer.top = …` would clash with `[gaps]\nouter.top = …`)
+    /// so we leave the user's old values commented out for reference and emit
+    /// the managed equivalent inside the preferences marker block.
+    static func migrateInlineGapsIfNeeded() {
+        let path = Paths.aerospaceToml
+        guard var text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        // Find a top-level `[gaps]` header (not `[gaps.something]` and not
+        // inside a comment).
+        let lines = text.components(separatedBy: "\n")
+        guard let headerIdx = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "[gaps]" }) else {
+            return
+        }
+        // Find end: next top-level `[…]` header or EOF.
+        var endIdx = lines.count
+        for j in (headerIdx + 1)..<lines.count {
+            let t = lines[j].trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("[") && t.hasSuffix("]") { endIdx = j; break }
+        }
+        var migrated = lines
+        let banner = "# [aerospace-control] gaps below were migrated into the managed `preferences` marker block above."
+        migrated.insert(banner, at: headerIdx)
+        for k in (headerIdx + 1)..<(endIdx + 1) {
+            let line = migrated[k]
+            if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+            if line.hasPrefix("#") { continue }
+            migrated[k] = "# " + line
+        }
+        text = migrated.joined(separator: "\n")
+        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+        NSLog("[bootstrap] migrated inline [gaps] into preferences marker")
     }
 }
 
@@ -431,7 +656,72 @@ enum Generators {
         for ws in config.workspaces {
             lines.append("alt-shift-\(ws.id.lowercased()) = 'move-node-to-workspace \(ws.id)'")
         }
+        // Opt-in: alt-shift-backtick → run our reset-windows script. Adds the
+        // binding inside the SAME [mode.main.binding] block as the per-workspace
+        // bindings so users don't have to wire it up by hand.
+        if config.preferences?.reset_windows_binding == true {
+            lines.append("alt-shift-backtick = 'exec-and-forget \(Paths.resetWindowsSh)'")
+        }
         replaceSection(file: Paths.aerospaceToml, marker: "workspace-bindings",
+                       newBody: lines.joined(separator: "\n"))
+    }
+
+    /// Default-layout / orientation / gaps. Lives at the top level of
+    /// aerospace.toml, so it must be regenerated whenever the user touches
+    /// Preferences. Uses dot-notation (`gaps.outer.top = …`) to avoid
+    /// conflicting with any inline `[gaps]` table the user might still have.
+    static func regenerateAerospacePreferences(_ config: AppConfig) {
+        var lines = [GEN_HEADER]
+
+        let p = config.preferences
+
+        // Layout + orientation. Only emit when explicitly set so we don't fight
+        // any user-edited values outside the marker.
+        if let layout = p?.default_layout {
+            lines.append("default-root-container-layout = '\(layout)'")
+        }
+        if let orient = p?.default_orientation {
+            lines.append("default-root-container-orientation = '\(orient)'")
+        }
+
+        // Inner gaps.
+        if let h = p?.inner_horizontal { lines.append("gaps.inner.horizontal = \(h)") }
+        if let v = p?.inner_vertical   { lines.append("gaps.inner.vertical   = \(v)") }
+
+        // Outer gaps. Each side gets a per-monitor list (`[{ monitor.X = N }, …, default]`)
+        // when overrides exist; otherwise falls back to a single value.
+        let perMon = p?.monitor_padding ?? [:]
+        let dflt   = p?.default_outer
+        for (side, defaultValue) in [
+            ("top",    dflt?.top),
+            ("right",  dflt?.right),
+            ("bottom", dflt?.bottom),
+            ("left",   dflt?.left),
+        ] {
+            // Collect per-monitor values for this side.
+            let entries: [(String, Int)] = perMon.compactMap { (name, pad) in
+                let v: Int?
+                switch side {
+                case "top":    v = pad.top
+                case "right":  v = pad.right
+                case "bottom": v = pad.bottom
+                case "left":   v = pad.left
+                default:       v = nil
+                }
+                return v.map { (name, $0) }
+            }.sorted { $0.0 < $1.0 }
+            // Skip the side entirely if neither default nor any override is set.
+            if entries.isEmpty && defaultValue == nil { continue }
+            if entries.isEmpty {
+                lines.append("gaps.outer.\(side) = \(defaultValue!)")
+            } else {
+                let parts = entries.map { "{ monitor.\"\($0.0)\" = \($0.1) }" }
+                let trailing = defaultValue.map(String.init) ?? "0"
+                lines.append("gaps.outer.\(side) = [\(parts.joined(separator: ", ")), \(trailing)]")
+            }
+        }
+
+        replaceSection(file: Paths.aerospaceToml, marker: "preferences",
                        newBody: lines.joined(separator: "\n"))
     }
 
@@ -545,6 +835,7 @@ enum Generators {
     static func regenerateAll(_ config: AppConfig) {
         regenerateAerospaceBindings(config)
         regenerateAerospaceApps(config)
+        regenerateAerospacePreferences(config)
         regenerateResetWindowsScript(config)
         regenerateWorkspacesShell(config)
         regenerateWorkspaceColorsShell(config)
@@ -747,6 +1038,11 @@ class WorkspaceChipView: NSView {
     weak var mapperView: MonitorsTabView?
     var label: NSTextField!
 
+    /// Hover popover (lazy). Built on first hover and reused.
+    private var hoverPopover: NSPopover?
+    /// Pending hover-show task; cancellable on early mouseExited.
+    private var pendingHoverWork: DispatchWorkItem?
+
     override var mouseDownCanMoveWindow: Bool { false }
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -760,6 +1056,88 @@ class WorkspaceChipView: NSView {
         setup()
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for ta in trackingAreas { removeTrackingArea(ta) }
+        let opts: NSTrackingArea.Options = [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect]
+        addTrackingArea(NSTrackingArea(rect: bounds, options: opts, owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        // Slight delay so quick fly-bys don't pop. Cancelled by mouseExited.
+        let work = DispatchWorkItem { [weak self] in self?.showHoverPopover() }
+        pendingHoverWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        pendingHoverWork?.cancel()
+        pendingHoverWork = nil
+        hoverPopover?.close()
+    }
+
+    private func showHoverPopover() {
+        guard let cfg = mapperView?.config else { return }
+        let assigned = cfg.apps.filter { $0.workspace == workspace }
+        // Build content view: header (workspace label) + each app row.
+        let rowH: CGFloat = 22, pad: CGFloat = 10
+        let contentW: CGFloat = 220
+        let rows = max(assigned.count, 1)
+        let contentH = pad * 2 + 22 /*header*/ + CGFloat(rows) * rowH
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: contentW, height: contentH))
+        content.wantsLayer = true
+        content.layer?.backgroundColor = Colors.surface0.cgColor
+
+        // Header
+        let header = NSTextField(labelWithString: cfg.workspaces.first { $0.id == workspace }?.label.flatMap { $0.isEmpty ? nil : "\(workspace) · \($0)" } ?? "Workspace \(workspace)")
+        header.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        header.textColor = color
+        header.backgroundColor = .clear
+        header.isBezeled = false
+        header.isEditable = false
+        header.frame = NSRect(x: pad, y: contentH - pad - 18, width: contentW - 2 * pad, height: 18)
+        content.addSubview(header)
+
+        if assigned.isEmpty {
+            let none = NSTextField(labelWithString: "No apps assigned")
+            none.font = NSFont.systemFont(ofSize: 11)
+            none.textColor = Colors.subtext0
+            none.backgroundColor = .clear
+            none.isBezeled = false
+            none.isEditable = false
+            none.frame = NSRect(x: pad, y: contentH - pad - 18 - rowH, width: contentW - 2 * pad, height: rowH)
+            content.addSubview(none)
+        } else {
+            for (i, app) in assigned.enumerated() {
+                let y = contentH - pad - 18 - CGFloat(i + 1) * rowH
+                let iv = NSImageView(frame: NSRect(x: pad, y: y + 2, width: 18, height: 18))
+                iv.image = NSWorkspace.shared.icon(forFile:
+                    NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.app_id)?.path ?? "")
+                iv.imageScaling = .scaleProportionallyDown
+                content.addSubview(iv)
+
+                let lbl = NSTextField(labelWithString: app.app_name)
+                lbl.font = NSFont.systemFont(ofSize: 11)
+                lbl.textColor = Colors.text
+                lbl.backgroundColor = .clear
+                lbl.isBezeled = false
+                lbl.isEditable = false
+                lbl.lineBreakMode = .byTruncatingTail
+                lbl.frame = NSRect(x: pad + 24, y: y + 2, width: contentW - pad * 2 - 24, height: rowH - 4)
+                content.addSubview(lbl)
+            }
+        }
+
+        let vc = NSViewController()
+        vc.view = content
+        let pop = NSPopover()
+        pop.behavior = .transient
+        pop.contentSize = content.frame.size
+        pop.contentViewController = vc
+        hoverPopover = pop
+        pop.show(relativeTo: bounds, of: self, preferredEdge: .minY)
+    }
 
     private func setup() {
         wantsLayer = true
@@ -1896,6 +2274,405 @@ class WorkspacesTabView: NSView {
     }
 }
 
+// MARK: - Preferences Tab
+
+/// One of the six layout tiles in the layout picker. Visually represents an
+/// (orientation × layout) combination — the user clicks a tile and we write
+/// `default-root-container-layout` + `default-root-container-orientation`
+/// into the preferences marker.
+class LayoutTileView: NSView {
+    let layout: String        // "tiles" | "accordion"
+    let orientation: String   // "horizontal" | "vertical" | "auto"
+    let title: String
+    weak var prefsTab: PreferencesTabView?
+    private(set) var isSelected: Bool = false
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    init(frame: NSRect, layout: String, orientation: String, title: String, prefsTab: PreferencesTabView) {
+        self.layout = layout
+        self.orientation = orientation
+        self.title = title
+        self.prefsTab = prefsTab
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.backgroundColor = Colors.surface0.cgColor
+        layer?.borderWidth = 1.5
+        layer?.borderColor = Colors.surface1.cgColor
+
+        // Title underneath the preview.
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        label.textColor = Colors.subtext1
+        label.backgroundColor = .clear
+        label.isBezeled = false
+        label.alignment = .center
+        label.frame = NSRect(x: 0, y: 6, width: bounds.width, height: 14)
+        label.autoresizingMask = [.width]
+        addSubview(label)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setSelected(_ s: Bool) {
+        isSelected = s
+        layer?.borderColor = s ? Colors.mauve.cgColor : Colors.surface1.cgColor
+        layer?.borderWidth = s ? 2.5 : 1.5
+        layer?.backgroundColor = (s ? Colors.surface1 : Colors.surface0).cgColor
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        prefsTab?.layoutTileTapped(self)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let canvas = NSRect(x: 14, y: 26, width: bounds.width - 28, height: bounds.height - 40)
+        // Outer rounded card frame.
+        let outer = NSBezierPath(roundedRect: canvas, xRadius: 8, yRadius: 8)
+        Colors.base.setFill()
+        outer.fill()
+        Colors.surface2.setStroke()
+        outer.lineWidth = 1
+        outer.stroke()
+        // Two "windows" rendered per the layout × orientation combination.
+        let pad: CGFloat = 6
+        let inset = canvas.insetBy(dx: pad, dy: pad)
+        let pinkFill = Colors.pink.withAlphaComponent(0.7)
+        let blueFill = Colors.sapphire.withAlphaComponent(0.7)
+        switch (layout, orientation) {
+        case ("tiles", "horizontal"):
+            let half = (inset.width - pad) / 2
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY, width: half, height: inset.height), fill: pinkFill)
+            drawWindow(rect: NSRect(x: inset.minX + half + pad, y: inset.minY, width: half, height: inset.height), fill: blueFill)
+        case ("tiles", "vertical"):
+            let half = (inset.height - pad) / 2
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY + half + pad, width: inset.width, height: half), fill: pinkFill)
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY, width: inset.width, height: half), fill: blueFill)
+        case ("tiles", "auto"):
+            // Wider canvas → horizontal split (matches aerospace's auto rule).
+            let half = (inset.width - pad) / 2
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY, width: half, height: inset.height), fill: pinkFill)
+            drawWindow(rect: NSRect(x: inset.minX + half + pad, y: inset.minY, width: half, height: inset.height), fill: blueFill)
+        case ("accordion", "horizontal"):
+            // Stack: front blue covering most width, pink peeking from left.
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY, width: 8, height: inset.height), fill: pinkFill)
+            drawWindow(rect: NSRect(x: inset.minX + 14, y: inset.minY, width: inset.width - 14, height: inset.height), fill: blueFill)
+        case ("accordion", "vertical"):
+            // Stack: blue covers most height, pink peeking from bottom.
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY, width: inset.width, height: 8), fill: pinkFill)
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY + 14, width: inset.width, height: inset.height - 14), fill: blueFill)
+        default: // accordion auto → vertical for tall, horizontal for wide; we draw horizontal stack
+            drawWindow(rect: NSRect(x: inset.minX, y: inset.minY, width: 8, height: inset.height), fill: pinkFill)
+            drawWindow(rect: NSRect(x: inset.minX + 14, y: inset.minY, width: inset.width - 14, height: inset.height), fill: blueFill)
+        }
+    }
+
+    private func drawWindow(rect: NSRect, fill: NSColor) {
+        let p = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
+        fill.setFill()
+        p.fill()
+    }
+}
+
+class PreferencesTabView: NSView {
+    var config: AppConfig
+    weak var rootView: RootView?
+    let monitors: [MonitorInfo]
+    private var layoutTiles: [LayoutTileView] = []
+    private var resetToggle: NSButton!
+    private var paddingFields: [String: [String: NSTextField]] = [:]  // [monitorName][side] → field
+    private var defaultPaddingFields: [String: NSTextField] = [:]      // side → field
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    init(frame: NSRect, config: AppConfig, monitors: [MonitorInfo]) {
+        self.config = config
+        self.monitors = monitors
+        super.init(frame: frame)
+        setup()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        wantsLayer = true
+
+        let subtitle = NSTextField(labelWithString: "Layout, padding, and other tweaks. Changes save and reload AeroSpace immediately.")
+        subtitle.font = NSFont.systemFont(ofSize: 11)
+        subtitle.textColor = Colors.subtext0
+        subtitle.backgroundColor = .clear
+        subtitle.isBezeled = false
+        subtitle.isEditable = false
+        subtitle.sizeToFit()
+        subtitle.frame.origin = NSPoint(x: 24, y: bounds.height - 20)
+        addSubview(subtitle)
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 16, width: bounds.width - 32, height: bounds.height - 48))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        addSubview(scroll)
+
+        let docView = FlippedView(frame: NSRect(x: 0, y: 0, width: scroll.frame.width, height: 0))
+        scroll.documentView = docView
+
+        var y: CGFloat = 8
+
+        // ── Section: Default layout ──────────────────────────────────────
+        y = addSectionHeader("Default layout", in: docView, y: y)
+
+        let combos: [(String, String, String)] = [
+            ("tiles",     "horizontal", "Tiles · ⇋"),
+            ("tiles",     "vertical",   "Tiles · ⇅"),
+            ("tiles",     "auto",       "Tiles · auto"),
+            ("accordion", "horizontal", "Accordion · ⇋"),
+            ("accordion", "vertical",   "Accordion · ⇅"),
+            ("accordion", "auto",       "Accordion · auto"),
+        ]
+        let cols = 3
+        let cardW: CGFloat = 140, cardH: CGFloat = 110, gap: CGFloat = 12
+        let totalW = CGFloat(cols) * cardW + CGFloat(cols - 1) * gap
+        let originX = (docView.frame.width - totalW) / 2
+        let curLayout = config.preferences?.default_layout ?? "tiles"
+        let curOrient = config.preferences?.default_orientation ?? "auto"
+        for (idx, combo) in combos.enumerated() {
+            let row = idx / cols
+            let col = idx % cols
+            let frame = NSRect(x: originX + CGFloat(col) * (cardW + gap),
+                               y: y + CGFloat(row) * (cardH + gap),
+                               width: cardW, height: cardH)
+            let tile = LayoutTileView(frame: frame, layout: combo.0,
+                                      orientation: combo.1, title: combo.2,
+                                      prefsTab: self)
+            tile.setSelected(combo.0 == curLayout && combo.1 == curOrient)
+            docView.addSubview(tile)
+            layoutTiles.append(tile)
+        }
+        y += CGFloat((combos.count + cols - 1) / cols) * (cardH + gap) + 16
+
+        // ── Section: Toggles ─────────────────────────────────────────────
+        y = addSectionHeader("Keybindings", in: docView, y: y)
+        resetToggle = NSButton(checkboxWithTitle: "  alt+shift+`  →  reset all windows to assigned workspaces",
+                               target: self, action: #selector(resetToggleChanged(_:)))
+        resetToggle.state = (config.preferences?.reset_windows_binding == true) ? .on : .off
+        // contentTintColor doesn't paint the checkbox label — use attributedTitle
+        // so the text actually renders against the dark background.
+        resetToggle.attributedTitle = NSAttributedString(
+            string: resetToggle.title,
+            attributes: [
+                .foregroundColor: Colors.text,
+                .font: NSFont.systemFont(ofSize: 12),
+            ])
+        resetToggle.frame = NSRect(x: 24, y: y, width: docView.frame.width - 48, height: 22)
+        docView.addSubview(resetToggle)
+        y += 30
+
+        // ── Section: Padding (per monitor) ───────────────────────────────
+        y = addSectionHeader("Window padding", in: docView, y: y)
+        let helpLabel = NSTextField(labelWithString: "Outer gaps in pixels. Each monitor can override the default. Hot-reloads on edit.")
+        helpLabel.font = NSFont.systemFont(ofSize: 10)
+        helpLabel.textColor = Colors.subtext0
+        helpLabel.backgroundColor = .clear
+        helpLabel.isBezeled = false
+        helpLabel.isEditable = false
+        helpLabel.sizeToFit()
+        helpLabel.frame.origin = NSPoint(x: 24, y: y)
+        docView.addSubview(helpLabel)
+        y += 22
+
+        // Default row first.
+        y = addPaddingRow(name: "Default (all monitors)", monitorName: nil,
+                         padding: config.preferences?.default_outer ?? MonitorPadding(top: 30, right: 30, bottom: 30, left: 30),
+                         in: docView, y: y)
+
+        for mon in monitors {
+            let pad = config.preferences?.monitor_padding?[mon.name]
+            y = addPaddingRow(name: mon.name, monitorName: mon.name,
+                             padding: pad ?? MonitorPadding(top: nil, right: nil, bottom: nil, left: nil),
+                             in: docView, y: y)
+        }
+
+        y += 16
+        docView.frame.size.height = y
+    }
+
+    private func addSectionHeader(_ text: String, in docView: NSView, y: CGFloat) -> CGFloat {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        label.textColor = Colors.text
+        label.backgroundColor = .clear
+        label.isBezeled = false
+        label.isEditable = false
+        label.sizeToFit()
+        label.frame.origin = NSPoint(x: 24, y: y)
+        docView.addSubview(label)
+        return y + 26
+    }
+
+    private func addPaddingRow(name: String, monitorName: String?, padding: MonitorPadding,
+                               in docView: NSView, y: CGFloat) -> CGFloat {
+        let labelWidth: CGFloat = 220
+        let label = NSTextField(labelWithString: name)
+        label.font = NSFont.systemFont(ofSize: 11, weight: monitorName == nil ? .semibold : .regular)
+        label.textColor = monitorName == nil ? Colors.subtext1 : Colors.text
+        label.backgroundColor = .clear
+        label.isBezeled = false
+        label.isEditable = false
+        label.frame = NSRect(x: 24, y: y + 2, width: labelWidth, height: 18)
+        docView.addSubview(label)
+
+        var x: CGFloat = 24 + labelWidth
+        var fields: [String: NSTextField] = [:]
+        for (side, value) in [
+            ("top",    padding.top),
+            ("right",  padding.right),
+            ("bottom", padding.bottom),
+            ("left",   padding.left),
+        ] {
+            let cap = NSTextField(labelWithString: side)
+            cap.font = NSFont.systemFont(ofSize: 9)
+            cap.textColor = Colors.subtext0
+            cap.backgroundColor = .clear
+            cap.isBezeled = false
+            cap.isEditable = false
+            cap.frame = NSRect(x: x, y: y + 22, width: 50, height: 12)
+            docView.addSubview(cap)
+
+            let f = NSTextField(frame: NSRect(x: x, y: y, width: 56, height: 22))
+            f.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            f.alignment = .center
+            f.bezelStyle = .roundedBezel
+            f.focusRingType = .none
+            f.placeholderString = monitorName == nil ? "30" : "—"
+            f.stringValue = value.map(String.init) ?? ""
+            f.target = self
+            f.action = #selector(paddingChanged(_:))
+            f.identifier = NSUserInterfaceItemIdentifier("padding|\(monitorName ?? "")|\(side)")
+            NotificationCenter.default.addObserver(self, selector: #selector(paddingLiveChanged(_:)),
+                                                   name: NSControl.textDidEndEditingNotification, object: f)
+            docView.addSubview(f)
+            fields[side] = f
+            x += 64
+        }
+
+        if let mn = monitorName {
+            paddingFields[mn] = fields
+        } else {
+            defaultPaddingFields = fields
+        }
+        return y + 44
+    }
+
+    func layoutTileTapped(_ tile: LayoutTileView) {
+        for t in layoutTiles { t.setSelected(t === tile) }
+        ensurePrefs()
+        config.preferences?.default_layout = tile.layout
+        config.preferences?.default_orientation = tile.orientation
+        commit()
+        // aerospace's `default-root-container-layout` only applies to NEW
+        // workspaces — existing ones stay on whatever layout they were created
+        // with. Re-tile every workspace right now so the user sees the change
+        // they just clicked.
+        retileAllWorkspaces(layout: tile.layout, orientation: tile.orientation)
+    }
+
+    private func retileAllWorkspaces(layout: String, orientation: String) {
+        // aerospace's `layout` command operates on the focused container. To
+        // hit every workspace we briefly switch focus to each in turn, run the
+        // layout command, then return to the originally focused workspace.
+        // Single-argument orientations only — "auto" maps to "horizontal" for
+        // the live reflow (the actual auto behavior continues to apply to new
+        // workspaces via the marker block we just wrote).
+        let liveOrient = (orientation == "auto") ? "horizontal" : orientation
+        let originalWS = shell("aerospace list-workspaces --focused 2>&1")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let allOut = shell("aerospace list-workspaces --all 2>&1")
+        let workspaces = allOut
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        for ws in workspaces {
+            _ = shell("aerospace workspace \(ws) 2>&1")
+            _ = shell("aerospace flatten-workspace-tree 2>&1")
+            _ = shell("aerospace layout \(layout) \(liveOrient) 2>&1")
+        }
+        if !originalWS.isEmpty {
+            _ = shell("aerospace workspace \(originalWS) 2>&1")
+        }
+    }
+
+    @objc func resetToggleChanged(_ sender: NSButton) {
+        ensurePrefs()
+        config.preferences?.reset_windows_binding = (sender.state == .on)
+        // If the user already has an `alt-shift-backtick` binding outside our
+        // marker (eg. pointing at the legacy reset_windows.sh path), comment
+        // it out so our generated copy doesn't TOML-clash.
+        if sender.state == .on {
+            Bootstrap.migrateConflictingBinding("alt-shift-backtick")
+        }
+        commit()
+    }
+
+    @objc func paddingChanged(_ sender: NSTextField) { applyPaddingFromFields() }
+    @objc func paddingLiveChanged(_ note: Notification) { applyPaddingFromFields() }
+
+    private func applyPaddingFromFields() {
+        ensurePrefs()
+        // Default outer gaps.
+        var d = config.preferences?.default_outer ?? MonitorPadding()
+        d.top    = parsePad(defaultPaddingFields["top"])    ?? d.top
+        d.right  = parsePad(defaultPaddingFields["right"])  ?? d.right
+        d.bottom = parsePad(defaultPaddingFields["bottom"]) ?? d.bottom
+        d.left   = parsePad(defaultPaddingFields["left"])   ?? d.left
+        config.preferences?.default_outer = d
+
+        // Per-monitor overrides. Empty string clears the override.
+        var perMon = config.preferences?.monitor_padding ?? [:]
+        for (mon, fields) in paddingFields {
+            var p = perMon[mon] ?? MonitorPadding()
+            p.top    = parsePad(fields["top"])
+            p.right  = parsePad(fields["right"])
+            p.bottom = parsePad(fields["bottom"])
+            p.left   = parsePad(fields["left"])
+            // Drop entry entirely if all sides are nil.
+            if p.top == nil && p.right == nil && p.bottom == nil && p.left == nil {
+                perMon.removeValue(forKey: mon)
+            } else {
+                perMon[mon] = p
+            }
+        }
+        config.preferences?.monitor_padding = perMon
+        // First-time padding adoption: migrate any inline `[gaps]` table out
+        // of the way so our generated `gaps.outer.top = …` doesn't TOML-clash.
+        Bootstrap.migrateInlineGapsIfNeeded()
+        commit()
+    }
+
+    private func parsePad(_ field: NSTextField?) -> Int? {
+        let s = field?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
+        if s.isEmpty { return nil }
+        return Int(s)
+    }
+
+    private func ensurePrefs() {
+        if config.preferences == nil {
+            config.preferences = PreferencesConfig()
+        }
+    }
+
+    /// Save + regenerate + reload — the "hot reload" the Preferences tab
+    /// promises. Stays local to this tab so toggling a checkbox doesn't have
+    /// to wait for the user to press Apply.
+    private func commit() {
+        ConfigManager.save(config)
+        Generators.regenerateAll(config)
+        Generators.reloadAerospace()
+        rootView?.preferencesChanged(config)
+    }
+}
+
 // MARK: - Root View (tab bar + current tab + apply/cancel)
 class RootView: NSView, TabBarDelegate {
     var config: AppConfig
@@ -1904,6 +2681,7 @@ class RootView: NSView, TabBarDelegate {
     private var monitorsTab: MonitorsTabView!
     private var appsTab: AppsTabView!
     private var workspacesTab: WorkspacesTabView!
+    private var preferencesTab: PreferencesTabView!
     private var tabContainer: NSView!
 
     override var mouseDownCanMoveWindow: Bool { false }
@@ -1969,7 +2747,7 @@ class RootView: NSView, TabBarDelegate {
         addSubview(themeBtn)
 
         // Tab bar (centered below title)
-        tabBar = TabBarView(tabs: ["Monitors", "Apps", "Workspaces"],
+        tabBar = TabBarView(tabs: ["Monitors", "Apps", "Workspaces", "Preferences"],
                             frame: NSRect(x: 0, y: bounds.height - 76, width: bounds.width, height: 36))
         tabBar.delegate = self
         addSubview(tabBar)
@@ -1984,8 +2762,10 @@ class RootView: NSView, TabBarDelegate {
         monitorsTab = MonitorsTabView(frame: innerFrame, config: config)
         appsTab = AppsTabView(frame: innerFrame, config: config)
         workspacesTab = WorkspacesTabView(frame: innerFrame, config: config)
+        preferencesTab = PreferencesTabView(frame: innerFrame, config: config, monitors: monitors)
         appsTab.rootView = self
         workspacesTab.rootView = self
+        preferencesTab.rootView = self
 
         // Prefer the saved layout for this exact monitor signature; fall back to
         // whatever AeroSpace currently has assigned.
@@ -2004,7 +2784,7 @@ class RootView: NSView, TabBarDelegate {
         cancelBtn.frame.origin = NSPoint(x: applyBtn.frame.origin.x - cancelBtn.frame.width - 8, y: 16)
         addSubview(cancelBtn)
 
-        let hints = NSTextField(labelWithString: "⏎ Apply · ⎋ Cancel · ⌘1/⌘2/⌘3 Switch tabs")
+        let hints = NSTextField(labelWithString: "⏎ Apply · ⎋ Cancel · ⌘1/⌘2/⌘3/⌘4 Switch tabs")
         hints.font = NSFont.systemFont(ofSize: 10)
         hints.textColor = Colors.overlay0
         hints.backgroundColor = .clear
@@ -2020,6 +2800,7 @@ class RootView: NSView, TabBarDelegate {
         monitorsTab.config = newConfig
         appsTab.config = newConfig
         workspacesTab.config = newConfig
+        preferencesTab.config = newConfig
 
         // Rebuild monitors tab so chips reflect any added/removed/renamed/recolored workspaces.
         // Preserve current in-memory monitor assignments where possible so the user's drag-drop state survives.
@@ -2034,6 +2815,16 @@ class RootView: NSView, TabBarDelegate {
         if tabContainer.subviews.contains(appsTab) { appsTab.reloadRows() }
     }
 
+    /// Hot-reload from the Preferences tab — config is already saved to disk
+    /// and aerospace.toml regenerated; we just need to update in-memory state
+    /// and rebuild any visible tab whose state derives from preferences.
+    func preferencesChanged(_ newConfig: AppConfig) {
+        self.config = newConfig
+        monitorsTab.config = newConfig
+        appsTab.config = newConfig
+        workspacesTab.config = newConfig
+    }
+
     func tabBar(_ bar: TabBarView, didSelectTab index: Int) {
         for sub in tabContainer.subviews { sub.removeFromSuperview() }
         let tab: NSView
@@ -2041,6 +2832,7 @@ class RootView: NSView, TabBarDelegate {
         case 0: tab = monitorsTab
         case 1: tab = appsTab; appsTab.reloadRows()
         case 2: tab = workspacesTab
+        case 3: tab = preferencesTab
         default: tab = monitorsTab
         }
         tabContainer.addSubview(tab)
@@ -2122,6 +2914,7 @@ class RootView: NSView, TabBarDelegate {
         case 18 where cmd: tabBar.select(index: 0)
         case 19 where cmd: tabBar.select(index: 1)
         case 20 where cmd: tabBar.select(index: 2)
+        case 21 where cmd: tabBar.select(index: 3)
         default:     super.keyDown(with: event)
         }
     }
@@ -2140,8 +2933,17 @@ func applyLayoutHeadless(layout: [String: String], monitors: [MonitorInfo]) {
     var skbCases = ""
     for (ws, monName) in layout {
         if let mon = monitors.first(where: { $0.name == monName }) {
-            _ = shell("aerospace move-workspace-to-monitor --workspace \(ws) \(mon.aerospaceId) 2>/dev/null")
+            // Capture stderr too so we can see when aerospace rejects a move
+            // (e.g. monitor not yet visible). The output goes into the watcher
+            // log so failures surface in /tmp/aerospace-control-watcher.{log,err}.
+            let out = shell("aerospace move-workspace-to-monitor --workspace \(ws) \(mon.aerospaceId) 2>&1")
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                NSLog("aerospace-control: move-workspace-to-monitor \(ws) → \(mon.aerospaceId) (\(monName)): \(trimmed)")
+            }
             skbCases += "        \(ws)) echo \(mon.sketchybarIndex) ;;\n"
+        } else {
+            NSLog("aerospace-control: WARN saved layout references monitor '\(monName)' not in current set — skipping ws \(ws)")
         }
     }
     let content = """

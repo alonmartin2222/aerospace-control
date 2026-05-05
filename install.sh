@@ -95,17 +95,15 @@ Next steps:
 1. Reload aerospace:   aerospace reload-config
 2. Press ctrl+alt+r to open the mapper.
 
-If ~/.config/aerospace/aerospace.toml already existed, ctrl+alt+r was NOT
-added automatically. Add this inside the [mode.main.binding] section:
+Setup wired up everything in ~/.config/aerospace/aerospace.toml:
+  • managed marker blocks for workspace bindings, app rules, layout/gaps
+  • after-startup-command → restores layouts on login
+
+If aerospace.toml already existed, the ctrl+alt+r binding may not have
+been added — if pressing it doesn't open the GUI, add this inside the
+[mode.main.binding] section:
 
        ctrl-alt-r = "exec-and-forget ${BIN_PATH}"
-
-Optional: run aerospace-control --auto on aerospace startup so layouts
-restore on login. Add to your top-level after-startup-command list:
-
-       after-startup-command = [
-         "exec-and-forget sleep 2 && ${BIN_PATH} --auto",
-       ]
 
 Sketchybar integration is OFF by default. Enable in the config:
     "sketchybar": { "enabled": true }

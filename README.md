@@ -17,14 +17,28 @@ arrangement automatically.
 
 <p align="center"><sub><b>Monitors</b> tab (left): drag workspace chips between detected monitors. <b>Apps</b> tab (right): click a workspace chip to assign an app.</sub></p>
 
+<p align="center">
+  <img src="docs/preferences-layout-tab.png" alt="Preferences tab — pick a default layout" width="49%">
+  <img src="docs/preferences-padding-tab.png" alt="Preferences tab — per-monitor window padding" width="49%">
+</p>
+
+<p align="center"><sub><b>Preferences</b> tab: pick a default layout (left), tick keybindings, and set per-monitor window padding with hot reload (right).</sub></p>
+
 ## Features
 
 - **Monitors tab** — drag colored workspace chips between detected monitors,
-  with quick presets for laptop / 2-monitor / 3-monitor setups.
+  with quick presets for laptop / 2-monitor / 3-monitor setups. Hover over a
+  chip to peek at the apps assigned to that workspace (icon + name).
 - **Apps tab** — running apps + already-assigned apps in one scrollable list,
   with a click-to-pick workspace badge per app.
 - **Workspaces tab** — create / rename / recolor / reorder / delete workspaces.
   Deletes confirm before unassigning affected apps.
+- **Preferences tab** — visual layout picker (tiles / accordion × horizontal /
+  vertical / auto), per-monitor window padding with live hot reload, and toggles
+  for managed keybindings (eg. `alt+shift+\`` to snap every window back to its
+  assigned workspace).
+- **Theme picker** — Catppuccin Mocha and a midnight-torii theme out of the box;
+  sketchybar colors and the GUI palette switch together.
 - **Per-signature memory** — each unique combination of monitor names gets its
   own saved layout. Plug in a different monitor and your previous layout for
   _that_ combo restores automatically.
@@ -55,21 +69,30 @@ cd aerospace-control
 The installer will:
 
 1. Compile the binary (`bin/aerospace-control`).
-2. Install it to `<PREFIX>/bin/aerospace-control`.
-3. Run `aerospace-control --setup` (creates `~/.config/aerospace-control/`,
-   inserts marker blocks into your `aerospace.toml`).
+2. Install it (codesigned ad-hoc) to `<PREFIX>/bin/aerospace-control`.
+3. Run `aerospace-control --setup`, which:
+   - creates `~/.config/aerospace-control/` with default `config.json`,
+   - creates `~/.config/aerospace/aerospace.toml` if missing (pre-wired with
+     `ctrl-alt-r` to launch the GUI and an `after-startup-command` to restore
+     layouts on login),
+   - inserts the marker blocks (`workspace-bindings`, `app-assignments`,
+     `preferences`) and migrates any conflicting top-level keys (`[gaps]`,
+     `default-root-container-layout`, `alt-shift-backtick`) by commenting them
+     out — your file is never silently overwritten outside markers.
 4. Install and load a LaunchAgent at
    `~/Library/LaunchAgents/dev.aerospace-control.watcher.plist` that listens for
    screen changes and auto-restores the right layout (skip with `--no-watcher`).
 
-After install, add this to `~/.config/aerospace/aerospace.toml` inside
-`[mode.main.binding]`:
+Then reload aerospace and you're done:
 
-```toml
-ctrl-alt-r = "exec-and-forget /usr/local/bin/aerospace-control"
+```bash
+aerospace reload-config
 ```
 
-And reload: `aerospace reload-config`.
+Press `ctrl+alt+r` to open the GUI. (If `aerospace.toml` already existed and
+that shortcut doesn't open anything, add
+`ctrl-alt-r = "exec-and-forget <PREFIX>/bin/aerospace-control"` inside
+`[mode.main.binding]` and reload again.)
 
 ### Uninstall
 
@@ -98,9 +121,23 @@ defaults give you 4 generic workspaces (`1`, `2`, `3`, `4`) — open the GUI
       "workspace": "B"
     }
   ],
+  "preferences": {
+    "default_layout": "tiles",
+    "default_orientation": "auto",
+    "reset_windows_binding": true,
+    "default_outer": { "top": 30, "right": 30, "bottom": 30, "left": 30 },
+    "monitor_padding": {
+      "Built-in Retina Display": { "top": 34 },
+      "L27h-4A": { "top": 80 }
+    }
+  },
+  "theme": "catppuccin-mocha",
   "sketchybar": { "enabled": false }
 }
 ```
+
+The `preferences` block is fully managed by the **Preferences** tab — open the
+GUI and change values there rather than hand-editing.
 
 ### Available colors
 
@@ -116,6 +153,7 @@ following marker-wrapped sections are rewritten in-place:
 | -------------------------------------------- | -------------------- |
 | `~/.config/aerospace/aerospace.toml`         | `workspace-bindings` |
 | `~/.config/aerospace/aerospace.toml`         | `app-assignments`    |
+| `~/.config/aerospace/aerospace.toml`         | `preferences`        |
 | `~/.config/sketchybar/sketchybarrc` _opt-in_ | `workspaces`         |
 
 Plus these _generated_ helper files (always written):
@@ -166,11 +204,11 @@ aerospace-control --version
 
 ## Keyboard shortcuts (in the GUI)
 
-| Key                | Action                                     |
-| ------------------ | ------------------------------------------ |
-| `⏎`                | Apply                                      |
-| `⎋`                | Cancel                                     |
-| `⌘1` / `⌘2` / `⌘3` | Switch tabs (Monitors / Apps / Workspaces) |
+| Key                       | Action                                                   |
+| ------------------------- | -------------------------------------------------------- |
+| `⏎`                       | Apply                                                    |
+| `⎋`                       | Cancel                                                   |
+| `⌘1` / `⌘2` / `⌘3` / `⌘4` | Switch tabs (Monitors / Apps / Workspaces / Preferences) |
 
 ## How it works
 
